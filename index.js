@@ -47,7 +47,7 @@ app.get("/", (req, res) => {
   res.send("Express app is running");
 });
 
-// Image Storage Engine
+// Image Storage Engine for multer
 const storage = multer.diskStorage({
   destination: "./upload/images",
   filename: (req, file, cb) => {
@@ -57,51 +57,100 @@ const storage = multer.diskStorage({
     );
   },
 });
+
 const upload = multer({ storage: storage });
 
 // Helper function to delete the file after upload
 const unlinkFile = util.promisify(fs.unlink);
 
-// Creating Upload Endpoint for images
-app.post("/upload", upload.single("product"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ success: 0, message: "No file uploaded." });
-  }
+// Firebase Storage Bucket
+// const bucket = admin.storage().bucket();
 
-  const localFilePath = path.join(__dirname, req.file.path); // Path to the temporary file
-  const destination = `images/${Date.now()}_${req.file.originalname}`; // Destination in Firebase Storage
+// Creating Upload Endpoint for images (main product and subimages)
+app.post(
+  "/upload",
+  upload.fields([
+    { name: "product" },
+    { name: "subimage1" },
+    { name: "subimage2" },
+    { name: "subimage3" },
+  ]),
+  async (req, res) => {
+    const files = req.files;
+    if (!files || !files.product) {
+      return res
+        .status(400)
+        .json({ success: 0, message: "No files uploaded." });
+    }
 
-  // Upload file to Firebase Storage
-  bucket
-    .upload(localFilePath, {
-      destination: destination,
-      metadata: {
-        contentType: req.file.mimetype, // Preserve file MIME type
-      },
-    })
-    .then(async (file) => {
-      // Generate a signed URL to access the file publicly
-      const fileUrl = await file[0].getSignedUrl({
-        action: "read",
-        expires: "03-09-2491", // Set a far future expiration date
-      });
+    try {
+      let uploadedUrls = {};
 
-      // Delete the temporary local file
-      await unlinkFile(localFilePath);
+      // Helper function to upload a file to Firebase Storage
+      const uploadToFirebase = async (file, folder = "images") => {
+        const localFilePath = path.join(__dirname, file.path);
+        const destination = `${folder}/${Date.now()}_${file.originalname}`;
 
-      // Send back the Firebase Storage URL in the response
+        const fileUpload = await bucket.upload(localFilePath, {
+          destination: destination,
+          metadata: {
+            contentType: file.mimetype, // Preserve file MIME type
+          },
+        });
+
+        // Generate a signed URL to access the file publicly
+        const fileUrl = await fileUpload[0].getSignedUrl({
+          action: "read",
+          expires: "03-09-2491",
+        });
+
+        // Delete the temporary local file
+        await unlinkFile(localFilePath);
+
+        return fileUrl[0]; // Return the URL
+      };
+
+      // Upload main product image
+      if (files.product) {
+        uploadedUrls.image_url = await uploadToFirebase(files.product[0]);
+      }
+
+      // Upload subimages if present
+      if (files.subimage1) {
+        uploadedUrls.subimage1_url = await uploadToFirebase(files.subimage1[0]);
+      }
+      if (files.subimage2) {
+        uploadedUrls.subimage2_url = await uploadToFirebase(files.subimage2[0]);
+      }
+      if (files.subimage3) {
+        uploadedUrls.subimage3_url = await uploadToFirebase(files.subimage3[0]);
+      }
+
+      // Send back the URLs of uploaded images
       res.json({
         success: 1,
-        image_url: fileUrl[0],
+        ...uploadedUrls,
       });
-    })
-    .catch((error) => {
-      console.error("Error uploading file to Firebase Storage:", error);
+    } catch (error) {
+      console.error("Error uploading files to Firebase Storage:", error);
       res.status(500).json({ success: 0, message: "File upload failed." });
-    });
+    }
+  }
+);
+
+// Get all orders
+app.get("/allorders", async (req, res) => {
+  try {
+    let orders = await Order.find({}); // Assuming 'Order' is your Mongoose model for orders
+    console.log("All orders fetched");
+    res.send(orders);
+  } catch (error) {
+    console.error("Error fetching orders:", error);
+    res.status(500).send("Error fetching orders");
+  }
 });
 
-// Schema for creating products
+// MongoDB Product Schema (updated to include subimages)
 const Product = mongoose.model("Product", {
   id: {
     type: Number,
@@ -114,6 +163,15 @@ const Product = mongoose.model("Product", {
   image: {
     type: String,
     required: true,
+  },
+  subimage1: {
+    type: String,
+  },
+  subimage2: {
+    type: String,
+  },
+  subimage3: {
+    type: String,
   },
   category: {
     type: String,
@@ -137,29 +195,34 @@ const Product = mongoose.model("Product", {
   },
 });
 
-// Add a new product
+// Add a new product (including subimages)
 app.post("/addproduct", async (req, res) => {
   try {
     let products = await Product.find({});
     let id;
     if (products.length > 0) {
-      let last_product_array = products.slice(-1);
-      let last_product = last_product_array[0];
+      let last_product = products.slice(-1)[0];
       id = last_product.id + 1;
     } else {
       id = 1;
     }
+
+    // Create new product entry
     const product = new Product({
       id: id,
       name: req.body.name,
-      image: req.body.image,
+      image: req.body.image, // Main image URL
+      subimage1: req.body.subimage1 || "", // Subimage1 URL
+      subimage2: req.body.subimage2 || "", // Subimage2 URL
+      subimage3: req.body.subimage3 || "", // Subimage3 URL
       category: req.body.category,
       new_price: req.body.new_price,
       old_price: req.body.old_price,
     });
+
     console.log(product);
     await product.save();
-    console.log("Saved");
+    console.log("Product saved");
     res.json({
       success: true,
       name: req.body.name,
@@ -169,6 +232,7 @@ app.post("/addproduct", async (req, res) => {
     res.status(500).json({ success: false, message: "Error adding product." });
   }
 });
+
 // Remove a product
 app.post("/removeproduct", async (req, res) => {
   try {
@@ -333,6 +397,7 @@ app.post("/update-profile", async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 });
+
 const orderSchema = new mongoose.Schema({
   razorpay_order_id: { type: String, required: true },
   name: { type: String, required: true },
